@@ -22,8 +22,10 @@ configure<ApplicationExtension> {
         applicationId = "org.lsposed.corepatch"
         minSdk = 28
         targetSdk = 37
-        versionCode = 2
-        versionName = "1.1-oneui9"
+        versionCode = providers.gradleProperty("releaseVersionCode")
+            .orNull?.toIntOrNull() ?: 2
+        versionName = providers.gradleProperty("releaseVersionName")
+            .orNull ?: "1.1-oneui9"
     }
 
     signingConfigs {
