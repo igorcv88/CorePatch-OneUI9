@@ -112,10 +112,13 @@ object SharedUserSettingHook : BaseHook() {
                 } ?: return
                 if (b1 || b2) return
 
-                newSignatures = if (newSignatures == null) {
-                    packageSignatures
+                if (newSignatures == null) {
+                    newSignatures = packageSignatures
                 } else {
-                    mergeLineageWith(newSignatures, packageSignatures)
+                    // A failed lineage merge must abort this mutation. Continuing would allow a
+                    // later package to become a new accumulator and write an incomplete lineage.
+                    val merged = mergeLineageWith(newSignatures, packageSignatures) ?: return
+                    newSignatures = merged
                 }
             }
 
