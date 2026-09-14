@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.os.Build
 import org.lsposed.corepatch.Config
 import org.lsposed.corepatch.XposedHelper.hookBefore
-import org.lsposed.corepatch.XposedHelper.hostClassLoader
 import java.util.Arrays
 
 object SigningDetailsHook : BaseHook() {
@@ -12,68 +11,76 @@ object SigningDetailsHook : BaseHook() {
 
     @SuppressLint("PrivateApi")
     override fun hook() {
-        val signingDetailsClazz =
+        val signingDetailsClazz = findClassOrNull(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                hostClassLoader.loadClass("android.content.pm.SigningDetails")
+                "android.content.pm.SigningDetails"
             } else {
-                hostClassLoader.loadClass("android.content.pm.PackageParser\$SigningDetails")
+                "android.content.pm.PackageParser\$SigningDetails"
             }
+        ) ?: return
 
-        // https://cs.android.com/android/platform/superproject/+/android-9.0.0_r61:frameworks/base/core/java/android/content/pm/PackageParser.java;l=5851
-        // public boolean checkCapability(SigningDetails oldDetails, @CertCapabilities int flags)
-
-        val checkCapabilityMethod = signingDetailsClazz.getDeclaredMethod(
-            "checkCapability", signingDetailsClazz, Int::class.java
-        )
-        hookBefore(checkCapabilityMethod) { callback ->
-            if (Config.isBypassDigestEnabled()) {
-                if (callback.args[1] != 4 && callback.args[1] != 16) {
-                    callback.returnAndSkip(true)
+        findMethodOrNull(signingDetailsClazz, "checkCapability(SigningDetails, int)") { m ->
+            m.name == "checkCapability" &&
+                m.parameterCount == 2 &&
+                m.parameterTypes[0] == signingDetailsClazz &&
+                m.parameterTypes[1] == Int::class.javaPrimitiveType
+        }?.let { method ->
+            compat("hook checkCapability") {
+                hookBefore(method) { callback ->
+                    if (Config.isBypassDigestEnabled()) {
+                        val capability = callback.args.getOrNull(1) as? Int ?: return@hookBefore
+                        if (capability != 4 && capability != 16) callback.returnAndSkip(true)
+                    }
                 }
             }
         }
 
-        // https://cs.android.com/android/platform/superproject/+/android-9.0.0_r61:frameworks/base/core/java/android/content/pm/PackageParser.java;l=5962
-        // public boolean checkCapabilityRecover(SigningDetails oldDetails, @CertCapabilities int flags)
-        // New package has a different signature
-        val checkCapabilityRecoverMethod = signingDetailsClazz.getDeclaredMethod(
-            "checkCapabilityRecover", signingDetailsClazz, Int::class.java
-        )
-        hookBefore(checkCapabilityRecoverMethod) { callback ->
-            if (Config.isBypassDigestEnabled()) {
-                // Don't handle PERMISSION (grant SIGNATURE permissions to pkgs with this cert)
-                // Or applications will have all privileged permissions
-                // https://cs.android.com/android/platform/superproject/+/master:frameworks/base/core/java/android/content/pm/PackageParser.java;l=5947
-                if (callback.args[1] != 4 && callback.args[1] != 16) {
-                    callback.returnAndSkip(true)
+        findMethodOrNull(signingDetailsClazz, "checkCapabilityRecover(SigningDetails, int)") { m ->
+            m.name == "checkCapabilityRecover" &&
+                m.parameterCount == 2 &&
+                m.parameterTypes[0] == signingDetailsClazz &&
+                m.parameterTypes[1] == Int::class.javaPrimitiveType
+        }?.let { method ->
+            compat("hook checkCapabilityRecover") {
+                hookBefore(method) { callback ->
+                    if (Config.isBypassDigestEnabled()) {
+                        val capability = callback.args.getOrNull(1) as? Int ?: return@hookBefore
+                        if (capability != 4 && capability != 16) callback.returnAndSkip(true)
+                    }
                 }
             }
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // for SharedUser
-            // "Package " + packageName + " has a signing lineage " + "that diverges from the lineage of the sharedUserId"
-            // https://cs.android.com/android/platform/superproject/+/android-11.0.0_r1:frameworks/base/services/core/java/com/android/server/pm/PackageManagerServiceUtils.java;l=725
-            val hasCommonAncestorMethod = signingDetailsClazz.getDeclaredMethod(
-                "hasCommonAncestor", signingDetailsClazz
-            )
-            hookBefore(hasCommonAncestorMethod) { callback ->
-                if (Config.isBypassDigestEnabled() && Config.isBypassSharedUserEnabled()
-                    // because of LSPosed's bug, we can't hook verifySignatures while deoptimize it
-                    && Arrays.stream(
-                        Thread.currentThread().stackTrace
-                    ).anyMatch { o: StackTraceElement -> "verifySignatures" == o.methodName }
-                ) {
-                    callback.returnAndSkip(true)
+            findMethodOrNull(signingDetailsClazz, "hasCommonAncestor(SigningDetails)") { m ->
+                m.name == "hasCommonAncestor" &&
+                    m.parameterCount == 1 &&
+                    m.parameterTypes[0] == signingDetailsClazz
+            }?.let { method ->
+                compat("hook hasCommonAncestor") {
+                    hookBefore(method) { callback ->
+                        if (Config.isBypassDigestEnabled() && Config.isBypassSharedUserEnabled() &&
+                            Arrays.stream(Thread.currentThread().stackTrace)
+                                .anyMatch { o: StackTraceElement -> "verifySignatures" == o.methodName }
+                        ) {
+                            callback.returnAndSkip(true)
+                        }
+                    }
                 }
             }
         }
 
-        // https://cs.android.com/android/platform/superproject/+/android-9.0.0_r61:frameworks/base/core/java/android/content/pm/PackageParser.java;l=6036
-        val signaturesMatchExactlyMethod = signingDetailsClazz.getDeclaredMethod("signaturesMatchExactly", signingDetailsClazz)
-        hookBefore(signaturesMatchExactlyMethod) { callback ->
-            if (Config.isBypassExactSignatureMatch()) {
-                callback.returnAndSkip(true)
+        findMethodOrNull(signingDetailsClazz, "signaturesMatchExactly(SigningDetails)") { m ->
+            m.name == "signaturesMatchExactly" &&
+                m.parameterCount == 1 &&
+                m.parameterTypes[0] == signingDetailsClazz
+        }?.let { method ->
+            compat("hook signaturesMatchExactly") {
+                hookBefore(method) { callback ->
+                    if (Config.isBypassExactSignatureMatch()) {
+                        callback.returnAndSkip(true)
+                    }
+                }
             }
         }
     }
