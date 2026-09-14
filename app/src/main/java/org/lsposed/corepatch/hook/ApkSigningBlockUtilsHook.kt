@@ -3,7 +3,6 @@ package org.lsposed.corepatch.hook
 import android.annotation.SuppressLint
 import org.lsposed.corepatch.Config
 import org.lsposed.corepatch.XposedHelper.hookBefore
-import org.lsposed.corepatch.XposedHelper.hostClassLoader
 
 object ApkSigningBlockUtilsHook : BaseHook() {
     override val name = "ApkSigningBlockUtilsHook"
@@ -11,22 +10,38 @@ object ApkSigningBlockUtilsHook : BaseHook() {
     @SuppressLint("PrivateApi")
     override fun hook() {
         val apkSigningBlockUtilsClazz =
-            hostClassLoader.loadClass("android.util.apk.ApkSigningBlockUtils")
-        // https://cs.android.com/android/platform/superproject/+/android-9.0.0_r61:frameworks/base/core/java/android/util/apk/ApkSigningBlockUtils.java;l=303
-        val parseVerityDigestAndVerifySourceLengthMethod =
-            apkSigningBlockUtilsClazz.declaredMethods.first { m -> m.name == "parseVerityDigestAndVerifySourceLength" }
-        hookBefore(parseVerityDigestAndVerifySourceLengthMethod) { callback ->
-            if (Config.isBypassVerificationEnabled()) {
-                callback.returnAndSkip((callback.args[0] as ByteArray).copyOfRange(0, 32))
-            }
-        }
+            findClassOrNull("android.util.apk.ApkSigningBlockUtils") ?: return
 
-        val verifyIntegrityForVerityBasedAlgorithmMethod =
-            apkSigningBlockUtilsClazz.declaredMethods.first { m -> m.name == "verifyIntegrityForVerityBasedAlgorithm" }
-        hookBefore(verifyIntegrityForVerityBasedAlgorithmMethod) { callback ->
-            if (Config.isBypassVerificationEnabled()) {
-                callback.returnAndSkip(null)
+        findMethodOrNull(
+            apkSigningBlockUtilsClazz,
+            "parseVerityDigestAndVerifySourceLength",
+        ) { m -> m.name == "parseVerityDigestAndVerifySourceLength" }
+            ?.let { method ->
+                compat("hook parseVerityDigestAndVerifySourceLength") {
+                    hookBefore(method) { callback ->
+                        if (Config.isBypassVerificationEnabled()) {
+                            val digest = callback.args.getOrNull(0) as? ByteArray
+                                ?: return@hookBefore
+                            if (digest.size >= 32) {
+                                callback.returnAndSkip(digest.copyOfRange(0, 32))
+                            }
+                        }
+                    }
+                }
             }
-        }
+
+        findMethodOrNull(
+            apkSigningBlockUtilsClazz,
+            "verifyIntegrityForVerityBasedAlgorithm",
+        ) { m -> m.name == "verifyIntegrityForVerityBasedAlgorithm" }
+            ?.let { method ->
+                compat("hook verifyIntegrityForVerityBasedAlgorithm") {
+                    hookBefore(method) { callback ->
+                        if (Config.isBypassVerificationEnabled()) {
+                            callback.returnAndSkip(null)
+                        }
+                    }
+                }
+            }
     }
 }

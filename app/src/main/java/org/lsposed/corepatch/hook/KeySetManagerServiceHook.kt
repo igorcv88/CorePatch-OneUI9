@@ -3,7 +3,6 @@ package org.lsposed.corepatch.hook
 import android.annotation.SuppressLint
 import org.lsposed.corepatch.Config
 import org.lsposed.corepatch.XposedHelper.hookBefore
-import org.lsposed.corepatch.XposedHelper.hostClassLoader
 import java.util.Arrays
 
 object KeySetManagerServiceHook : BaseHook() {
@@ -12,51 +11,50 @@ object KeySetManagerServiceHook : BaseHook() {
     @SuppressLint("PrivateApi")
     override fun hook() {
         val keySetManagerServiceClazz =
-            hostClassLoader.loadClass("com.android.server.pm.KeySetManagerService")
+            findClassOrNull("com.android.server.pm.KeySetManagerService") ?: return
 
         val shouldBypass = ThreadLocal<Boolean>()
 
-        // https://cs.android.com/android/platform/superproject/+/android-9.0.0_r61:frameworks/base/services/core/java/com/android/server/pm/KeySetManagerService.java;l=346
-        // public boolean shouldCheckUpgradeKeySetLocked(PackageSettingBase oldPs, int scanFlags)
-        val shouldCheckUpgradeKeySetLockedMethod =
-            keySetManagerServiceClazz.declaredMethods.first { m ->
-                m.name == "shouldCheckUpgradeKeySetLocked" && m.returnType == Boolean::class.java
-            }
-        hookBefore(shouldCheckUpgradeKeySetLockedMethod) { callback ->
-            if (Config.isBypassDigestEnabled() && Arrays.stream(
-                    Thread.currentThread().stackTrace
-                )
-                    // https://cs.android.com/android/platform/superproject/+/android-9.0.0_r61:frameworks/base/services/core/java/com/android/server/pm/PackageManagerService.java;l=17068
-                    // private void installPackageLI(InstallArgs args, PackageInstalledInfo res)
-                    // https://cs.android.com/android/platform/superproject/+/android-10.0.0_r47:frameworks/base/services/core/java/com/android/server/pm/PackageManagerService.java;l=17246
-                    // https://cs.android.com/android/platform/superproject/+/android-13.0.0_r74:frameworks/base/services/core/java/com/android/server/pm/InstallPackageHelper.java;l=1074
-                    // private PrepareResult preparePackageLI(InstallArgs args, PackageInstalledInfo res)
-                    // https://cs.android.com/android/platform/superproject/+/android-15.0.0_r36:frameworks/base/services/core/java/com/android/server/pm/InstallPackageHelper.java;l=1381
-                    // private void preparePackage(InstallRequest request)
-                    // https://cs.android.com/android/platform/superproject/+/android15-qpr2-release:frameworks/base/services/core/java/com/android/server/pm/InstallPackageHelper.java;l=1275
-                    // private List<ReconciledPackage> reconcileInstallPackages(List<InstallRequest> requests, Map<String, Settings.VersionInfo> versionInfos)
-                    .anyMatch { o: StackTraceElement ->
-                        /* API 35 */ "preparePackage" == o.methodName ||
-                        /* API 35 */ "reconcileInstallPackages" == o.methodName ||
-                        /* API 29 */ "preparePackageLI" == o.methodName ||
-                        /* API 28 */ "installPackageLI" == o.methodName
+        findMethodOrNull(
+            keySetManagerServiceClazz,
+            "shouldCheckUpgradeKeySetLocked",
+        ) { m ->
+            m.name == "shouldCheckUpgradeKeySetLocked" &&
+                m.returnType == Boolean::class.java
+        }?.let { shouldCheckUpgradeKeySetLockedMethod ->
+            compat("hook shouldCheckUpgradeKeySetLocked") {
+                hookBefore(shouldCheckUpgradeKeySetLockedMethod) { callback ->
+                    if (Config.isBypassDigestEnabled() && Arrays.stream(
+                            Thread.currentThread().stackTrace
+                        ).anyMatch { o: StackTraceElement ->
+                            /* Android 15+ */ "preparePackage" == o.methodName ||
+                            /* Android 15+ */ "reconcileInstallPackages" == o.methodName ||
+                            /* Android 10-14 */ "preparePackageLI" == o.methodName ||
+                            /* Android 9 */ "installPackageLI" == o.methodName
+                        }
+                    ) {
+                        shouldBypass.set(true)
+                        callback.returnAndSkip(true)
+                    } else {
+                        shouldBypass.set(false)
                     }
-            ) {
-                shouldBypass.set(true)
-                callback.returnAndSkip(true)
-            } else {
-                shouldBypass.set(false)
+                }
             }
         }
 
-        // https://cs.android.com/android/platform/superproject/+/android-9.0.0_r61:frameworks/base/services/core/java/com/android/server/pm/KeySetManagerService.java;l=367
-        // public boolean checkUpgradeKeySetLocked(PackageSettingBase oldPS, PackageParser.Package newPkg)
-        val checkUpgradeKeySetLockedMethod = keySetManagerServiceClazz.declaredMethods.first { m ->
-            m.name == "checkUpgradeKeySetLocked" && m.returnType == Boolean::class.java
-        }
-        hookBefore(checkUpgradeKeySetLockedMethod) { callback ->
-            if (Config.isBypassDigestEnabled() && shouldBypass.get() == true) {
-                callback.returnAndSkip(true)
+        findMethodOrNull(
+            keySetManagerServiceClazz,
+            "checkUpgradeKeySetLocked",
+        ) { m ->
+            m.name == "checkUpgradeKeySetLocked" &&
+                m.returnType == Boolean::class.java
+        }?.let { checkUpgradeKeySetLockedMethod ->
+            compat("hook checkUpgradeKeySetLocked") {
+                hookBefore(checkUpgradeKeySetLockedMethod) { callback ->
+                    if (Config.isBypassDigestEnabled() && shouldBypass.get() == true) {
+                        callback.returnAndSkip(true)
+                    }
+                }
             }
         }
     }
