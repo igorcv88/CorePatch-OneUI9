@@ -142,7 +142,7 @@ object ApkSignatureVerifierHook : BaseHook() {
                         if (Config.isUsePreviousSignaturesEnabled()) {
                             try {
                                 val activityThreadClazz =
-                                    Class.forName("android.app.ActivityThread", false, appClassLoader)
+                                    findClassOrNull("android.app.ActivityThread") ?: return@hookAfter
                                 val currentApplicationMethod =
                                     activityThreadClazz.getDeclaredMethod("currentApplication")
                                 val application = currentApplicationMethod.invoke(null) as? Application
