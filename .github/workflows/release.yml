@@ -164,10 +164,10 @@ jobs:
       - name: Publicar artifact do workflow
         uses: actions/upload-artifact@v4
         with:
-          name: CorePatch-OneUI9-${{ env.VERSION_NAME }}
+          name: CorePatch-OneUI9-release
           path: |
-            ${{ env.RELEASE_ASSET }}
-            ${{ env.RELEASE_ASSET }}.sha256
+            CorePatch-OneUI9-*.apk
+            CorePatch-OneUI9-*.apk.sha256
           if-no-files-found: error
 
       - name: Publicar GitHub Release
