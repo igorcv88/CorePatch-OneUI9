@@ -5,7 +5,6 @@ import android.os.Build
 import org.lsposed.corepatch.Config
 import org.lsposed.corepatch.XposedHelper
 import org.lsposed.corepatch.XposedHelper.hookBefore
-import org.lsposed.corepatch.XposedHelper.hostClassLoader
 import org.lsposed.corepatch.XposedHelper.log
 
 object PackageManagerServiceUtilsHook : BaseHook() {
@@ -14,57 +13,68 @@ object PackageManagerServiceUtilsHook : BaseHook() {
     @SuppressLint("PrivateApi")
     override fun hook() {
         val packageManagerServiceUtilsClazz =
-            hostClassLoader.loadClass("com.android.server.pm.PackageManagerServiceUtils")
+            findClassOrNull("com.android.server.pm.PackageManagerServiceUtils") ?: return
 
-        // https://cs.android.com/android/platform/superproject/+/android-9.0.0_r61:frameworks/base/services/core/java/com/android/server/pm/PackageManagerServiceUtils.java;l=552
-        // public static boolean verifySignatures(
-        //     PackageSetting pkgSetting,
-        //     PackageSetting disabledPkgSetting,
-        //     PackageParser.SigningDetails parsedSignatures,
-        //     boolean compareCompat,
-        //     boolean compareRecover)
-        // https://cs.android.com/android/platform/superproject/+/android-12.0.0_r34:frameworks/base/services/core/java/com/android/server/pm/PackageManagerServiceUtils.java;l=625
-        // public static boolean verifySignatures(
-        //     PackageSetting pkgSetting,
-        //     PackageSetting disabledPkgSetting,
-        //     PackageParser.SigningDetails parsedSignatures,
-        //     boolean compareCompat,
-        //     boolean compareRecover,
-        //     boolean isRollback)
-        val verifySignaturesMethod =
-            packageManagerServiceUtilsClazz.declaredMethods.first { m -> m.name == "verifySignatures" && m.returnType == Boolean::class.java }
-        if (!XposedHelper.deoptimize(verifySignaturesMethod)) log("failed to deoptimize verifySignatures")
-        hookBefore(verifySignaturesMethod) { callback ->
-            if (Config.isBypassVerificationEnabled()) {
-                callback.returnAndSkip(false)
+        // Signature-verification internals are frequently inlined or reshaped by OEM builds.
+        // Resolve them independently so one missing member does not disable downgrade handling.
+        findMethodOrNull(
+            packageManagerServiceUtilsClazz,
+            "verifySignatures",
+        ) { m -> m.name == "verifySignatures" && m.returnType == Boolean::class.java }
+            ?.let { verifySignaturesMethod ->
+                compat("deoptimize verifySignatures") {
+                    if (!XposedHelper.deoptimize(verifySignaturesMethod)) {
+                        log("failed to deoptimize verifySignatures")
+                    }
+                }
+                compat("hook verifySignatures") {
+                    hookBefore(verifySignaturesMethod) { callback ->
+                        if (Config.isBypassVerificationEnabled()) {
+                            callback.returnAndSkip(false)
+                        }
+                    }
+                }
             }
-        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // https://cs.android.com/android/platform/superproject/+/android-13.0.0_r1:frameworks/base/services/core/java/com/android/server/pm/PackageManagerServiceUtils.java;l=1375
-            // public static void checkDowngrade(com.android.server.pm.parsing.pkg.AndroidPackage before, PackageInfoLite after)
-            // https://cs.android.com/android/platform/superproject/+/android-14.0.0_r1:frameworks/base/services/core/java/com/android/server/pm/PackageManagerServiceUtils.java;l=1499
-            // public static void checkDowngrade(com.android.server.pm.pkg.AndroidPackage before, PackageInfoLite after)
-            // OneUI inlines the checkDowngrade methods into one, so we need to hook all methods with the same name and parameter types
-            packageManagerServiceUtilsClazz.declaredMethods
+            // One UI may inline the public overloads into a private/common implementation, so
+            // hook every compatible checkDowngrade overload that ends in PackageInfoLite.
+            val checkDowngradeMethods = packageManagerServiceUtilsClazz.declaredMethods
                 .filter { it.name == "checkDowngrade" && it.returnType == Void.TYPE }
                 .filter {
                     it.parameterTypes.lastOrNull()?.name ==
                         "android.content.pm.PackageInfoLite"
                 }
-                .forEach { checkDowngradeMethod ->
-                    hookBefore(checkDowngradeMethod) { callback ->
-                        if (Config.isBypassDowngradeEnabled()) callback.returnAndSkip(null)
+
+            if (checkDowngradeMethods.isEmpty()) {
+                compat<Unit>("checkDowngrade overloads") {
+                    throw NoSuchMethodException(
+                        "${packageManagerServiceUtilsClazz.name}#checkDowngrade(..., PackageInfoLite)"
+                    )
+                }
+            } else {
+                checkDowngradeMethods.forEach { checkDowngradeMethod ->
+                    compat("hook checkDowngrade ${checkDowngradeMethod.parameterTypes.contentToString()}") {
+                        hookBefore(checkDowngradeMethod) { callback ->
+                            if (Config.isBypassDowngradeEnabled()) callback.returnAndSkip(null)
+                        }
                     }
                 }
-        }
+            }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // ensure verifySignatures success
-            // https://cs.android.com/android/platform/superproject/main/+/main:frameworks/base/services/core/java/com/android/server/pm/PackageManagerServiceUtils.java;l=621
-            val canJoinSharedUserIdMethod =
-                packageManagerServiceUtilsClazz.declaredMethods.first { m -> m.name == "canJoinSharedUserId" }
-            if (!XposedHelper.deoptimize(canJoinSharedUserIdMethod)) log("failed to deoptimize canJoinSharedUserId")
+            // Used by shared-user signature reconciliation. It is an optimization only, so a
+            // vendor build without this exact helper must not abort the rest of Core Patch.
+            findMethodOrNull(
+                packageManagerServiceUtilsClazz,
+                "canJoinSharedUserId",
+            ) { m -> m.name == "canJoinSharedUserId" }
+                ?.let { canJoinSharedUserIdMethod ->
+                    compat("deoptimize canJoinSharedUserId") {
+                        if (!XposedHelper.deoptimize(canJoinSharedUserIdMethod)) {
+                            log("failed to deoptimize canJoinSharedUserId")
+                        }
+                    }
+                }
         }
     }
 }
