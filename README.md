@@ -14,6 +14,19 @@ This fork adds Android 17 / One UI 9 compatibility hardening while preserving up
 
 A missing optional framework member should now be logged and skipped without preventing unrelated Core Patch features from initializing.
 
+## Release workflow
+
+The `Gerar APK Release` GitHub Actions workflow builds the release APK, signs it with repository secrets, verifies package/version/signature metadata, uploads the signed APK as a workflow artifact, and publishes it to GitHub Releases with a SHA-256 checksum.
+
+Required Actions secrets:
+
+- `KEYSTORE_BASE64`
+- `KEYSTORE_PASSWORD`
+- `KEY_ALIAS`
+- `KEY_PASSWORD`
+
+The release series is versioned automatically as `1.1.x-oneui9`.
+
 ## Requirements
 
 - Android 9 and above
