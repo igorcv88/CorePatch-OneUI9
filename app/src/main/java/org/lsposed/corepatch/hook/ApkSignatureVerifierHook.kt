@@ -7,10 +7,8 @@ import android.content.pm.Signature
 import android.os.Build
 import org.lsposed.corepatch.Config
 import org.lsposed.corepatch.Constant
-import org.lsposed.corepatch.XposedHelper.findClassIfExists
 import org.lsposed.corepatch.XposedHelper.hookAfter
 import org.lsposed.corepatch.XposedHelper.hookBefore
-import org.lsposed.corepatch.XposedHelper.hostClassLoader
 import org.lsposed.corepatch.XposedHelper.log
 
 @SuppressLint(
@@ -24,200 +22,234 @@ object ApkSignatureVerifierHook : BaseHook() {
 
     override fun hook() {
         val apkSignatureVerifierClazz =
-            hostClassLoader.loadClass("android.util.apk.ApkSignatureVerifier")
-
-        val signingDetailsClazz =
+            findClassOrNull("android.util.apk.ApkSignatureVerifier") ?: return
+        val signingDetailsClazz = findClassOrNull(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                hostClassLoader.loadClass("android.content.pm.SigningDetails")
+                "android.content.pm.SigningDetails"
             } else {
-                hostClassLoader.loadClass("android.content.pm.PackageParser\$SigningDetails")
+                "android.content.pm.PackageParser\$SigningDetails"
             }
-        // SigningDetails(Signature[] signatures, int signatureSchemeVersion)
-        val signingDetailsConstructor =
-            signingDetailsClazz.declaredConstructors.first { constructor ->
+        ) ?: return
+
+        // V1 signature-recovery support is intentionally resolved as one optional block. OEMs can
+        // reshape any of these private classes without disabling unrelated verifier hooks.
+        compat("V1 signature recovery setup") v1setup@{
+            val signingDetailsConstructor = findConstructorOrNull(
+                signingDetailsClazz,
+                "Signature[], int",
+            ) { constructor ->
                 constructor.parameterCount == 2 &&
+                    constructor.parameterTypes[0].isArray &&
                     constructor.parameterTypes[0].componentType == Signature::class.java &&
-                    constructor.parameterTypes[1] == Int::class.java
-            }.apply { isAccessible = true }
+                    constructor.parameterTypes[1] == Int::class.javaPrimitiveType
+            }?.apply { isAccessible = true } ?: return@v1setup
 
-        val packageParserExceptionClazz =
-            hostClassLoader.loadClass("android.content.pm.PackageParser\$PackageParserException")
-        val errorField = packageParserExceptionClazz.getDeclaredField("error").apply {
-            isAccessible = true
-        }
+            val packageParserExceptionClazz =
+                findClassOrNull("android.content.pm.PackageParser\$PackageParserException")
+                    ?: return@v1setup
+            val errorField = findFieldOrNull(packageParserExceptionClazz, "error") {
+                it.name == "error"
+            }?.apply { isAccessible = true } ?: return@v1setup
 
-        val strictJarFileClazz = hostClassLoader.loadClass("android.util.jar.StrictJarFile")
-        val strictJarFileConstructor = strictJarFileClazz.getDeclaredConstructor(
-            String::class.java, Boolean::class.java, Boolean::class.java
-        ).apply { isAccessible = true }
-        val findEntryMethod = strictJarFileClazz.declaredMethods.first { method ->
-            method.name == "findEntry" &&
-                method.parameterCount == 1 &&
-                method.parameterTypes[0] == String::class.java
-        }.apply { isAccessible = true }
-        val closeMethod = strictJarFileClazz.getDeclaredMethod("close").apply {
-            isAccessible = true
-        }
-        val convertToSignaturesMethod =
-            apkSignatureVerifierClazz.declaredMethods.first { method ->
-                method.name == "convertToSignatures" && method.parameterCount == 1
-            }.apply { isAccessible = true }
+            val strictJarFileClazz =
+                findClassOrNull("android.util.jar.StrictJarFile") ?: return@v1setup
+            val strictJarFileConstructor = findConstructorOrNull(
+                strictJarFileClazz,
+                "String, boolean, boolean",
+            ) { constructor ->
+                constructor.parameterTypes.contentEquals(
+                    arrayOf(
+                        String::class.java,
+                        Boolean::class.javaPrimitiveType,
+                        Boolean::class.javaPrimitiveType,
+                    )
+                )
+            }?.apply { isAccessible = true } ?: return@v1setup
+            val findEntryMethod = findMethodOrNull(strictJarFileClazz, "findEntry(String)") { method ->
+                method.name == "findEntry" && method.parameterCount == 1 &&
+                    method.parameterTypes[0] == String::class.java
+            }?.apply { isAccessible = true } ?: return@v1setup
+            val closeMethod = findMethodOrNull(strictJarFileClazz, "close()") { method ->
+                method.name == "close" && method.parameterCount == 0
+            }?.apply { isAccessible = true } ?: return@v1setup
+            val convertToSignaturesMethod = findMethodOrNull(
+                apkSignatureVerifierClazz,
+                "convertToSignatures",
+            ) { method -> method.name == "convertToSignatures" && method.parameterCount == 1 }
+                ?.apply { isAccessible = true } ?: return@v1setup
 
-        val parseResultClazz = findClassIfExists(
-            "android.content.pm.parsing.result.ParseResult"
-        )
-        val parseResultIsErrorMethod = parseResultClazz?.getMethod("isError")
-        val parseResultGetErrorCodeMethod = parseResultClazz?.getMethod("getErrorCode")
-        val parseResultGetResultMethod = parseResultClazz?.getMethod("getResult")
-        val signingDetailsWithDigestsClazz = findClassIfExists(
-            "android.util.apk.ApkSignatureVerifier\$SigningDetailsWithDigests"
-        )
-        val signingDetailsWithDigestsConstructor = signingDetailsWithDigestsClazz
-            ?.getDeclaredConstructor(signingDetailsClazz, Map::class.java)
-            ?.apply { isAccessible = true }
+            val parseResultClazz = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                findClassOrNull("android.content.pm.parsing.result.ParseResult")
+            } else {
+                null
+            }
+            val parseResultIsErrorMethod = parseResultClazz?.let { clazz ->
+                findMethodOrNull(clazz, "isError()") { it.name == "isError" && it.parameterCount == 0 }
+            }
+            val parseResultGetErrorCodeMethod = parseResultClazz?.let { clazz ->
+                findMethodOrNull(clazz, "getErrorCode()") {
+                    it.name == "getErrorCode" && it.parameterCount == 0
+                }
+            }
+            val parseResultGetResultMethod = parseResultClazz?.let { clazz ->
+                findMethodOrNull(clazz, "getResult()") { it.name == "getResult" && it.parameterCount == 0 }
+            }
 
-        // https://cs.android.com/android/platform/superproject/+/android-9.0.0_r59:frameworks/base/core/java/android/util/apk/ApkSignatureVerifier.java;l=162
-        // private static PackageParser.SigningDetails verifyV1Signature(String apkPath, boolean verifyFull)
-        // https://cs.android.com/android/platform/superproject/+/android-12.0.0_r34:frameworks/base/core/java/android/util/apk/ApkSignatureVerifier.java;l=355
-        // private static SigningDetailsWithDigests verifyV1Signature(String apkPath, boolean verifyFull)
-        // https://cs.android.com/android/platform/superproject/+/android-13.0.0_r74:frameworks/base/core/java/android/util/apk/ApkSignatureVerifier.java;l=362
-        // private static ParseResult<SigningDetailsWithDigests> verifyV1Signature(ParseInput input, String apkPath, boolean verifyFull)
-        apkSignatureVerifierClazz.declaredMethods
-            .filter { method -> method.name == "verifyV1Signature" }
-            .forEach { verifyV1SignatureMethod ->
-                hookAfter(verifyV1SignatureMethod) { callback ->
-                    if (Config.isBypassVerificationEnabled()) {
+            val signingDetailsWithDigestsClazz = findClassOrNull(
+                "android.util.apk.ApkSignatureVerifier\$SigningDetailsWithDigests"
+            )
+            val signingDetailsWithDigestsConstructor = signingDetailsWithDigestsClazz?.let { clazz ->
+                findConstructorOrNull(clazz, "SigningDetails, Map") { constructor ->
+                    constructor.parameterCount == 2 &&
+                        constructor.parameterTypes[0] == signingDetailsClazz &&
+                        Map::class.java.isAssignableFrom(constructor.parameterTypes[1])
+                }?.apply { isAccessible = true }
+            }
+
+            val verifyV1Methods = apkSignatureVerifierClazz.declaredMethods
+                .filter { method -> method.name == "verifyV1Signature" }
+            if (verifyV1Methods.isEmpty()) {
+                throw NoSuchMethodException("${apkSignatureVerifierClazz.name}#verifyV1Signature")
+            }
+
+            verifyV1Methods.forEach { verifyV1SignatureMethod ->
+                compat("hook verifyV1Signature ${verifyV1SignatureMethod.parameterTypes.contentToString()}") {
+                    hookAfter(verifyV1SignatureMethod) { callback ->
+                        if (!Config.isBypassVerificationEnabled()) return@hookAfter
+
+                        val usesParseResult =
+                            parseResultClazz != null && verifyV1SignatureMethod.returnType == parseResultClazz
                         val throwable = callback.throwable
                         var parseError: Int? = null
-                        if (parseResultClazz != null &&
-                            verifyV1SignatureMethod.returnType == parseResultClazz
-                        ) {
+
+                        if (usesParseResult) {
                             val parseResult = callback.result
                             if (parseResult != null &&
                                 parseResultIsErrorMethod?.invoke(parseResult) == true
                             ) {
-                                parseError = parseResultGetErrorCodeMethod?.invoke(parseResult) as Int
+                                parseError = parseResultGetErrorCodeMethod?.invoke(parseResult) as? Int
                             }
                         }
 
-                        if (throwable != null || parseError != null) {
-                            var signaturesBefore: Any? = null
-                            // use previous signatures, get from package manager
-                            if (Config.isUsePreviousSignaturesEnabled()) {
-                                try {
-                                    val activityThreadClazz =
-                                        hostClassLoader.loadClass("android.app.ActivityThread")
-                                    val currentApplicationMethod =
-                                        activityThreadClazz.getDeclaredMethod("currentApplication")
-                                    val application =
-                                        currentApplicationMethod.invoke(null) as Application
-                                    val packageManager = application.packageManager
-                                    if (packageManager == null) {
-                                        log("Cannot get the Package Manager... Are you using MiUI?")
-                                    } else {
-                                        val packageInfo = packageManager.getPackageArchiveInfo(
-                                            callback.args[if (parseError == null) 0 else 1] as String,
-                                            0
+                        if (throwable == null && parseError == null) return@hookAfter
+
+                        val apkPathIndex = if (usesParseResult) 1 else 0
+                        val apkPath = callback.args.getOrNull(apkPathIndex) as? String
+                            ?: return@hookAfter
+                        var signaturesBefore: Any? = null
+
+                        // Prefer the installed package's signing lineage when requested.
+                        if (Config.isUsePreviousSignaturesEnabled()) {
+                            try {
+                                val activityThreadClazz =
+                                    Class.forName("android.app.ActivityThread", false, appClassLoader)
+                                val currentApplicationMethod =
+                                    activityThreadClazz.getDeclaredMethod("currentApplication")
+                                val application = currentApplicationMethod.invoke(null) as? Application
+                                val packageManager = application?.packageManager
+                                if (packageManager == null) {
+                                    log("Cannot get the Package Manager")
+                                } else {
+                                    val packageInfo = packageManager.getPackageArchiveInfo(apkPath, 0)
+                                    packageInfo?.let { info ->
+                                        val installedPackageInfo = packageManager.getPackageInfo(
+                                            info.packageName,
+                                            PackageManager.GET_SIGNING_CERTIFICATES,
                                         )
-                                        packageInfo?.let { info ->
-                                            val installedPackageInfo = packageManager.getPackageInfo(
-                                                info.packageName,
-                                                PackageManager.GET_SIGNING_CERTIFICATES
-                                            )
-                                            signaturesBefore = installedPackageInfo.signingInfo
-                                                ?.signingCertificateHistory
-                                        }
+                                        signaturesBefore = installedPackageInfo.signingInfo
+                                            ?.signingCertificateHistory
                                     }
-                                } catch (t: Throwable) {
-                                    log("cannot get signatures from installed package: ${t.message}")
                                 }
+                            } catch (t: Throwable) {
+                                log("cannot get signatures from installed package: ${t.message}")
                             }
-                            // if previous signatures not found, parse it from apk
-                            if (signaturesBefore == null && Config.isBypassDigestEnabled()) {
+                        }
+
+                        // If previous signatures are unavailable, recover certificates from V1/JAR.
+                        if (signaturesBefore == null && Config.isBypassDigestEnabled()) {
+                            try {
+                                val originalJarFile = strictJarFileConstructor.newInstance(
+                                    apkPath,
+                                    true,
+                                    false,
+                                )
                                 try {
-                                    // verifyV1Signature(String apkPath, boolean verifyFull)
-                                    // verifyV1Signature(ParseInput input, String apkPath, boolean verifyFull) // Android 13
-                                    val originalJarFile = strictJarFileConstructor.newInstance(
-                                        callback.args[if (parseError == null) 0 else 1],
-                                        true,
-                                        false
+                                    val manifestEntry = findEntryMethod.invoke(
+                                        originalJarFile,
+                                        "AndroidManifest.xml",
                                     )
-                                    try {
-                                        val manifestEntry = findEntryMethod.invoke(
-                                            originalJarFile, "AndroidManifest.xml"
+                                    val expectedParameterCount = if (usesParseResult) 3 else 2
+                                    val loadCertificatesMethod = apkSignatureVerifierClazz.declaredMethods
+                                        .firstOrNull { method ->
+                                            method.name == "loadCertificates" &&
+                                                method.parameterCount == expectedParameterCount
+                                        }?.apply { isAccessible = true }
+                                        ?: throw NoSuchMethodException(
+                                            "${apkSignatureVerifierClazz.name}#loadCertificates/$expectedParameterCount"
                                         )
 
-                                        //  9 private static Certificate[][] loadCertificates(StrictJarFile jarFile, ZipEntry entry)
-                                        // 13 private static ParseResult<Certificate[][]> loadCertificates(
-                                        //     ParseInput input, StrictJarFile jarFile, ZipEntry entry)
-                                        val loadCertificatesMethod =
-                                            apkSignatureVerifierClazz.declaredMethods.first { method ->
-                                                method.name == "loadCertificates" &&
-                                                    method.parameterCount ==
-                                                    if (parseError == null) 2 else 3
-                                            }.apply { isAccessible = true }
-                                        val lastCerts = if (parseError == null) {
+                                    val lastCerts = if (!usesParseResult) {
+                                        loadCertificatesMethod.invoke(
+                                            null,
+                                            originalJarFile,
+                                            manifestEntry,
+                                        )
+                                    } else {
+                                        val input = callback.args.getOrNull(0) ?: return@hookAfter
+                                        val certs = requireNotNull(
                                             loadCertificatesMethod.invoke(
-                                                null, originalJarFile, manifestEntry
+                                                null,
+                                                input,
+                                                originalJarFile,
+                                                manifestEntry,
                                             )
-                                        } else {
-                                            val certs = requireNotNull(
-                                                loadCertificatesMethod.invoke(
-                                                    null,
-                                                    callback.args[0],
-                                                    originalJarFile,
-                                                    manifestEntry
-                                                )
-                                            )
-                                            parseResultGetResultMethod?.invoke(certs)
-                                        }
-                                        signaturesBefore = convertToSignaturesMethod.invoke(
-                                            null, lastCerts
                                         )
-                                    } finally {
-                                        runCatching { closeMethod.invoke(originalJarFile) }
+                                        parseResultGetResultMethod?.invoke(certs)
                                     }
-                                } catch (t: Throwable) {
-                                    log("Unexpected error while parsing signatures", t)
+                                    signaturesBefore = convertToSignaturesMethod.invoke(null, lastCerts)
+                                } finally {
+                                    runCatching { closeMethod.invoke(originalJarFile) }
                                 }
+                            } catch (t: Throwable) {
+                                log("Unexpected error while parsing signatures", t)
                             }
+                        }
 
-                            val signingDetailsArgs: Array<Any> = arrayOf(
-                                signaturesBefore ?: arrayOf(Signature(Constant.SIGNATURE)),
-                                1,
-                            )
-                            var newResult =
-                                signingDetailsConstructor.newInstance(*signingDetailsArgs)
+                        val signingDetailsArgs: Array<Any> = arrayOf(
+                            signaturesBefore ?: arrayOf(Signature(Constant.SIGNATURE)),
+                            1,
+                        )
+                        var newResult = signingDetailsConstructor.newInstance(*signingDetailsArgs)
 
-                            // 修复 java.lang.ClassCastException: Cannot cast
-                            // PackageParser$SigningDetails to SigningDetailsWithDigests
-                            if (signingDetailsWithDigestsConstructor != null) {
-                                newResult = signingDetailsWithDigestsConstructor.newInstance(
-                                    newResult, null
-                                )
+                        if (signingDetailsWithDigestsConstructor != null) {
+                            newResult = signingDetailsWithDigestsConstructor.newInstance(newResult, null)
+                        }
+
+                        if (throwable != null) {
+                            val cause = throwable.cause
+                            if (throwable.javaClass == packageParserExceptionClazz &&
+                                errorField.getInt(throwable) == -103
+                            ) {
+                                callback.result = newResult
+                                callback.throwable = null
                             }
-
-                            if (throwable != null) {
-                                val cause = throwable.cause
-                                if (throwable.javaClass == packageParserExceptionClazz &&
-                                    errorField.getInt(throwable) == -103
-                                ) {
-                                    callback.result = newResult
-                                    callback.throwable = null
-                                }
-                                if (cause?.javaClass == packageParserExceptionClazz &&
-                                    errorField.getInt(cause) == -103
-                                ) {
-                                    callback.result = newResult
-                                    callback.throwable = null
-                                }
+                            if (cause?.javaClass == packageParserExceptionClazz &&
+                                errorField.getInt(cause) == -103
+                            ) {
+                                callback.result = newResult
+                                callback.throwable = null
                             }
-                            if (parseError == -103) {
-                                val input = callback.args[0]!!
-                                val resetMethod = input.javaClass.getMethod("reset")
-                                val successMethod = input.javaClass.getMethod(
-                                    "success", Any::class.java
-                                )
+                        }
+
+                        if (parseError == -103 && usesParseResult) {
+                            val input = callback.args.getOrNull(0) ?: return@hookAfter
+                            compat("reset ParseInput after signature error") reset@{
+                                val resetMethod = input.javaClass.methods
+                                    .firstOrNull { it.name == "reset" && it.parameterCount == 0 }
+                                    ?: return@reset
+                                val successMethod = input.javaClass.methods
+                                    .firstOrNull { it.name == "success" && it.parameterCount == 1 }
+                                    ?: return@reset
                                 resetMethod.invoke(input)
                                 callback.result = successMethod.invoke(input, newResult)
                                 callback.throwable = null
@@ -226,22 +258,25 @@ object ApkSignatureVerifierHook : BaseHook() {
                     }
                 }
             }
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // No signature found in package of version " + minSignatureSchemeVersion
-            // + " or newer for package " + apkPath
-            // https://cs.android.com/android/platform/superproject/+/android-11.0.0_r48:frameworks/base/core/java/android/util/apk/ApkSignatureVerifier.java;l=460
-            // public static int getMinimumSignatureSchemeVersionForTargetSdk(int targetSdk)
-            val getMinimumSignatureSchemeVersionForTargetSdkMethod =
-                apkSignatureVerifierClazz.getDeclaredMethod(
-                    "getMinimumSignatureSchemeVersionForTargetSdk", Int::class.java
-                )
-            hookBefore(getMinimumSignatureSchemeVersionForTargetSdkMethod) { callback ->
-                if (Config.isBypassVerificationEnabled()) {
-                    callback.returnAndSkip(0)
+            findMethodOrNull(
+                apkSignatureVerifierClazz,
+                "getMinimumSignatureSchemeVersionForTargetSdk(int)",
+            ) { method ->
+                method.name == "getMinimumSignatureSchemeVersionForTargetSdk" &&
+                    method.parameterCount == 1 &&
+                    method.parameterTypes[0] == Int::class.javaPrimitiveType
+            }?.let { method ->
+                compat("hook getMinimumSignatureSchemeVersionForTargetSdk") {
+                    hookBefore(method) { callback ->
+                        if (Config.isBypassVerificationEnabled()) {
+                            callback.returnAndSkip(0)
+                        }
+                    }
                 }
             }
         }
     }
-
 }
