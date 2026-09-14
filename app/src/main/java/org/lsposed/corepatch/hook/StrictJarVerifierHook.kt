@@ -4,77 +4,100 @@ import android.annotation.SuppressLint
 import org.lsposed.corepatch.Config
 import org.lsposed.corepatch.XposedHelper.hookAfter
 import org.lsposed.corepatch.XposedHelper.hookBefore
-import org.lsposed.corepatch.XposedHelper.hostClassLoader
 
 object StrictJarVerifierHook : BaseHook() {
     override val name = "StrictJarVerifierHook"
 
     @SuppressLint("PrivateApi", "DiscouragedPrivateApi")
     override fun hook() {
-        val strictJarVerifierClazz = hostClassLoader.loadClass("android.util.jar.StrictJarVerifier")
+        val strictJarVerifierClazz =
+            findClassOrNull("android.util.jar.StrictJarVerifier") ?: return
 
-        // https://cs.android.com/android/platform/superproject/main/+/main:frameworks/base/core/java/android/util/jar/StrictJarVerifier.java;l=529
-        // private static boolean verifyMessageDigest(byte[] expected, byte[] encodedActual)
-        val verifyMessageDigestMethod =
-            strictJarVerifierClazz.declaredMethods.first { m -> m.name == "verifyMessageDigest" && m.returnType == Boolean::class.java }
-        hookBefore(verifyMessageDigestMethod) { callback ->
-            if (Config.isBypassVerificationEnabled()) {
-                callback.returnAndSkip(true)
+        findMethodOrNull(strictJarVerifierClazz, "verifyMessageDigest") { m ->
+            m.name == "verifyMessageDigest" && m.returnType == Boolean::class.java
+        }?.let { method ->
+            compat("hook verifyMessageDigest") {
+                hookBefore(method) { callback ->
+                    if (Config.isBypassVerificationEnabled()) callback.returnAndSkip(true)
+                }
             }
         }
 
-        // https://cs.android.com/android/platform/superproject/main/+/main:frameworks/base/core/java/android/util/jar/StrictJarVerifier.java;l=502
-        // private boolean verify(
-        //     Attributes attributes,
-        //     String entry,
-        //     byte[] data,
-        //     int start,
-        //     int end,
-        //     boolean ignoreSecondEndline,
-        //     boolean ignorable)
-        val verifyMethod =
-            strictJarVerifierClazz.declaredMethods.first { m -> m.name == "verify" && m.returnType == Boolean::class.java }
-        hookBefore(verifyMethod) { callback ->
-            if (Config.isBypassVerificationEnabled()) {
-                callback.returnAndSkip(true)
+        findMethodOrNull(strictJarVerifierClazz, "verify") { m ->
+            m.name == "verify" && m.returnType == Boolean::class.java
+        }?.let { method ->
+            compat("hook StrictJarVerifier.verify") {
+                hookBefore(method) { callback ->
+                    if (Config.isBypassVerificationEnabled()) callback.returnAndSkip(true)
+                }
             }
         }
 
-        val strictJarVerifierConstructor = strictJarVerifierClazz.declaredConstructors.first()
-        val signatureSchemeRollbackProtectionsEnforcedField =
-            strictJarVerifierClazz.declaredFields.first { f -> f.name == "signatureSchemeRollbackProtectionsEnforced" }
-        signatureSchemeRollbackProtectionsEnforcedField.isAccessible = true
-        hookAfter(strictJarVerifierConstructor) { callback ->
-            if (Config.isBypassVerificationEnabled()) {
-                signatureSchemeRollbackProtectionsEnforcedField.set(
-                    callback.thisObject, false
-                )
+        val rollbackField = findFieldOrNull(
+            strictJarVerifierClazz,
+            "signatureSchemeRollbackProtectionsEnforced",
+        ) { it.name == "signatureSchemeRollbackProtectionsEnforced" }
+            ?.apply { isAccessible = true }
+        val verifierConstructor = strictJarVerifierClazz.declaredConstructors.firstOrNull()
+        if (rollbackField != null && verifierConstructor != null) {
+            compat("hook StrictJarVerifier constructor") {
+                hookAfter(verifierConstructor) { callback ->
+                    if (Config.isBypassVerificationEnabled()) {
+                        compat("disable signature scheme rollback protections") {
+                            rollbackField.set(callback.thisObject, false)
+                        }
+                    }
+                }
             }
         }
 
-        val pkcs7Clazz = hostClassLoader.loadClass("sun.security.pkcs.PKCS7")
-        val pkcs7Constructor = pkcs7Clazz.declaredConstructors.first { c ->
-            c.parameterTypes.size == 1 && c.parameterTypes[0] == ByteArray::class.java
-        }
-        val getSignerInfosMethod = pkcs7Clazz.getDeclaredMethod("getSignerInfos")
-        val signerInfoClazz = hostClassLoader.loadClass("sun.security.pkcs.SignerInfo")
-        val getCertificateChainMethod =
-            signerInfoClazz.getDeclaredMethod("getCertificateChain", pkcs7Clazz)
+        // V1/JAR certificate fallback used by the digest-bypass path. Keep this block isolated:
+        // libcore/private PKCS classes may change without affecting the other verifier hooks.
+        compat("V1 certificate fallback") {
+            val pkcs7Clazz = findClassOrNull("sun.security.pkcs.PKCS7") ?: return@compat
+            val pkcs7Constructor = findConstructorOrNull(
+                pkcs7Clazz,
+                "byte[]",
+            ) { c -> c.parameterTypes.contentEquals(arrayOf(ByteArray::class.java)) }
+                ?: return@compat
+            val getSignerInfosMethod = findMethodOrNull(pkcs7Clazz, "getSignerInfos") { m ->
+                m.name == "getSignerInfos" && m.parameterCount == 0
+            } ?: return@compat
 
-        // https://cs.android.com/android/platform/superproject/main/+/main:frameworks/base/core/java/android/util/jar/StrictJarVerifier.java;l=324
-        // static Certificate[] verifyBytes(byte[] blockBytes, byte[] sfBytes)
-        val verifyBytesMethod = strictJarVerifierClazz.getDeclaredMethod(
-            "verifyBytes", ByteArray::class.java, ByteArray::class.java
-        )
-        hookAfter(verifyBytesMethod) { callback ->
-            if (Config.isBypassDigestEnabled() && !Config.isUsePreviousSignaturesEnabled()) {
-                val block = pkcs7Constructor.newInstance(callback.args[0])
-                val signerInfo = getSignerInfosMethod.invoke(block) as Array<*>
-                if (signerInfo.isEmpty()) return@hookAfter
-                val signer = signerInfo[0]
-                val certs = getCertificateChainMethod.invoke(signer, block)
-                callback.result = certs
-                callback.throwable = null
+            val signerInfoClazz = findClassOrNull("sun.security.pkcs.SignerInfo") ?: return@compat
+            val getCertificateChainMethod = findMethodOrNull(
+                signerInfoClazz,
+                "getCertificateChain(PKCS7)",
+            ) { m ->
+                m.name == "getCertificateChain" &&
+                    m.parameterCount == 1 &&
+                    m.parameterTypes[0] == pkcs7Clazz
+            } ?: return@compat
+
+            val verifyBytesMethod = findMethodOrNull(
+                strictJarVerifierClazz,
+                "verifyBytes(byte[], byte[])",
+            ) { m ->
+                m.name == "verifyBytes" &&
+                    m.parameterTypes.contentEquals(
+                        arrayOf(ByteArray::class.java, ByteArray::class.java)
+                    )
+            } ?: return@compat
+
+            hookAfter(verifyBytesMethod) { callback ->
+                if (!Config.isBypassDigestEnabled() || Config.isUsePreviousSignaturesEnabled()) {
+                    return@hookAfter
+                }
+                compat("recover V1 signer certificate chain") {
+                    val block = pkcs7Constructor.newInstance(callback.args[0])
+                    val signerInfo = getSignerInfosMethod.invoke(block) as? Array<*>
+                        ?: return@compat
+                    if (signerInfo.isEmpty()) return@compat
+                    val signer = signerInfo[0] ?: return@compat
+                    val certs = getCertificateChainMethod.invoke(signer, block)
+                    callback.result = certs
+                    callback.throwable = null
+                }
             }
         }
     }
