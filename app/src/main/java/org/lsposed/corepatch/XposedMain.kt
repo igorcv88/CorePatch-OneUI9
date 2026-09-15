@@ -15,6 +15,7 @@ import org.lsposed.corepatch.hook.NtConfigListServiceImplHook
 import org.lsposed.corepatch.hook.PackageManagerServiceHook
 import org.lsposed.corepatch.hook.PackageManagerServiceUtilsHook
 import org.lsposed.corepatch.hook.ReconcilePackageUtilsHook
+import org.lsposed.corepatch.hook.SamsungAsksHook
 import org.lsposed.corepatch.hook.ScanPackageUtilsHook
 import org.lsposed.corepatch.hook.SharedUserSettingHook
 import org.lsposed.corepatch.hook.SigningDetailsHook
@@ -49,6 +50,7 @@ class XposedMain : XposedModule() {
             PackageManagerServiceHook,
             PackageManagerServiceUtilsHook,
             ReconcilePackageUtilsHook,
+            SamsungAsksHook,
             ScanPackageUtilsHook,
             SharedUserSettingHook,
             SigningDetailsHook,
