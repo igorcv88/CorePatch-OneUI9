@@ -11,6 +11,7 @@ This fork adds Android 17 / One UI 9 compatibility hardening while preserving up
 - Treats missing or OEM-inlined package-manager internals as optional and fail-soft instead of aborting an entire hook group.
 - Handles Samsung's One UI 9 build where `ScanPackageUtils.assertMinSignatureSchemeIsValid` is absent/inlined. The minimum-signature-scheme bypass remains covered by `ApkSignatureVerifierHook` when verification bypass is enabled.
 - Hardens package reconciliation, keyset, shared-user, verification-session, signing-details, APK signing-block, StrictJarVerifier, AssetManager, ApplicationInfo and MessageDigest hook setup against framework member changes.
+- Adds a Samsung Android 17 ASKS/AASA compatibility hook behind the existing `Bypass block` option. It lets `ASKSManagerService.verifyToken(...)` run normally, then normalizes only a non-zero verifier result to the local AASA success value `0`. The earlier ASKS protection/blacklist checks and the later ADP rollback policy are intentionally left unchanged.
 
 A missing optional framework member should now be logged and skipped without preventing unrelated Core Patch features from initializing.
 
