@@ -53,12 +53,6 @@ jobs:
     - name: Build with Gradle
       run: bash ./gradlew --no-daemon assembleRelease assembleDebug
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: outputs
-        path: app/build/outputs/apk
-
     - name: Remove temporary signing key
       if: always()
       run: rm -f key.jks
